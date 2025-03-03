@@ -7,6 +7,7 @@ pragma solidity =0.8.25; // cheaper than 0.8.28
 
 contract GasContract {
     uint immutable admin0;
+
     uint immutable admin1;
     uint immutable admin2;
     uint immutable admin3;
@@ -62,34 +63,50 @@ contract GasContract {
         // 28k
         // A placeholder for embeding the 4 admin immutables in the runtime code
         //   each byte is 200 gas, 4*32byte == 25.6k
-        ret = address(uint160((admin0 & admin1 & admin2 & admin3)));
+        //         ret = address(uint160((admin0 & admin1 & admin2 & admin3)));
 
-        // 8k
+        //         // 8k
+        //         assembly {
+        //             /*
+        //              Note: each byte is 8-bits, each digit is 4-bits (as half byte)
+
+        //              Copy 0x20 bytes from runtime code to memory, e.g.:
+        //               n=0, copy from offset = BASE + 0x17 = BASE + (OFFSETS >> 0  & 0xff)
+        //               n=1, copy from offset = BASE + 0x38 = BASE + (OFFSETS >> 8  & 0xff)
+        //               n=2, copy from offset = BASE + 0x5a = BASE + (OFFSETS >> 16 & 0xff)
+        //               n=3, copy from offset = BASE + 0x7c = BASE + (OFFSETS >> 24 & 0xff)
+        //               n=4, copy from offset = BASE + 0x00 = BASE + (OFFSETS >> 32 & 0xff)
+        // */
+        //             codecopy(0, add(BASE, and(shr(mul(n, 8), OFFSETS), 0xff)), 0x20)
+
+        //             /*
+        //              The memory[0] looks like:
+        //               n=0: 000000000000000000000000______________admin_0___________________
+        //               n=1: 000000000000000000000000______________admin_1___________________
+        //               n=2: 000000000000000000000000______________admin_2___________________
+        //               n=3: 000000000000000000000000______________admin_3___________________
+        //               n=4: 1234___________________60_random_digits_________________________
+
+        //              if n<4, return the result as `mload(0)`.
+        //              if n=4, right shift the result by 60 digits(240 bits).
+        // */
+        //             ret := shr(mul(div(n, 4), 240), mload(0))
+        //         }
+
         assembly {
-            /*
-             Note: each byte is 8-bits, each digit is 4-bits (as half byte)
-            
-             Copy 0x20 bytes from runtime code to memory, e.g.:
-              n=0, copy from offset = BASE + 0x17 = BASE + (OFFSETS >> 0  & 0xff)
-              n=1, copy from offset = BASE + 0x38 = BASE + (OFFSETS >> 8  & 0xff)
-              n=2, copy from offset = BASE + 0x5a = BASE + (OFFSETS >> 16 & 0xff)
-              n=3, copy from offset = BASE + 0x7c = BASE + (OFFSETS >> 24 & 0xff)
-              n=4, copy from offset = BASE + 0x00 = BASE + (OFFSETS >> 32 & 0xff)
-			*/
-            codecopy(0, add(BASE, and(shr(mul(n, 8), OFFSETS), 0xff)), 0x20)
-
-            /*
-             The memory[0] looks like:
-              n=0: 000000000000000000000000______________admin_0___________________
-              n=1: 000000000000000000000000______________admin_1___________________
-              n=2: 000000000000000000000000______________admin_2___________________
-              n=3: 000000000000000000000000______________admin_3___________________
-              n=4: 1234___________________60_random_digits_________________________
-            
-             if n<4, return the result as `mload(0)`.
-             if n=4, right shift the result by 60 digits(240 bits).
-			*/
-            ret := shr(mul(div(n, 4), 240), mload(0))
+            ret := OWNER
+        }
+        if (n == 0) {
+            ret = address(uint160(admin0));
+        }
+        if (n == 1) {
+            ret = address(uint160(admin1));
+        }
+        if (n == 2) {
+            ret = address(uint160(admin2));
+        }
+        if (n == 3) {
+            ret = address(uint160(admin3));
         }
     }
 
