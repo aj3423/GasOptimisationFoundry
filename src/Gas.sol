@@ -1,331 +1,208 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.0; 
 
-import "./Ownable.sol";
+// pragma solidity >=0.8.20 <=0.8.28;
+pragma solidity =0.8.25; // cheaper than 0.8.28
 
-contract Constants {
-    uint256 public tradeFlag = 1;
-    uint256 public basicFlag = 0;
-    uint256 public dividendFlag = 1;
-}
+// import "forge-std/console.sol";
 
-contract GasContract is Ownable, Constants {
-    uint256 public totalSupply = 0; // cannot be updated
-    uint256 public paymentCounter = 0;
-    mapping(address => uint256) public balances;
-    uint256 public tradePercent = 12;
-    address public contractOwner;
-    uint256 public tradeMode = 0;
-    mapping(address => Payment[]) public payments;
-    mapping(address => uint256) public whitelist;
-    address[5] public administrators;
-    bool public isReady = false;
-    enum PaymentType {
-        Unknown,
-        BasicPayment,
-        Refund,
-        Dividend,
-        GroupPayment
+contract GasContract {
+    uint immutable admin0;
+    uint immutable admin1;
+    uint immutable admin2;
+    uint immutable admin3;
+
+    uint constant OWNER = 0x1234;
+
+    uint constant TOTAL_SUPPLY = 1000000000; // 4 bytes: 0x3b9aca00
+
+    constructor(address[] memory /*_admins*/, uint _totalSupply) payable {
+        // Avoid storage writing, which costs 20k gas.
+        // Each immutable variable only costs 6.4k gas(32bytes * 200gas/byte).
+
+        // cheaper than `admin0 = _admins[0];`
+        assembly {
+            // Use `_totalSupply` as a local variable, to avoid creating a new one.
+            _totalSupply := mload(0x220) // _admins == 0x200
+        }
+        admin0 = _totalSupply;
+
+        assembly {
+            _totalSupply := mload(0x240)
+        }
+        admin1 = _totalSupply;
+
+        assembly {
+            _totalSupply := mload(0x260)
+        }
+        admin2 = _totalSupply;
+
+        assembly {
+            _totalSupply := mload(0x280)
+        }
+        admin3 = _totalSupply;
     }
-    PaymentType constant defaultPayment = PaymentType.Unknown;
 
-    History[] public paymentHistory; // when a payment was updated
+    // the offset of 0x1234(OWNER) in runtime code, followed by 4 admins.
+    // Use the `printCode` in Gas.UnitTests.t.sol to dump the runtime code.
+    uint constant BASE = 0x1f6;
+    // A ByteMap contains 5 offsets of: admin4_admin3_admin2_admin1_admin0
+    uint constant OFFSETS = 0x00_7c_5a_38_17;
 
-    struct Payment {
-        PaymentType paymentType;
-        uint256 paymentID;
-        bool adminUpdated;
-        string recipientName; // max 8 characters
-        address recipient;
-        address admin; // administrators address
-        uint256 amount;
-    }
+    function administrators(uint n) external view returns (address ret) {
+        /*
+         Hardcode the runtime offsets of the 5 admins, access them via BASE+offset
+        
+         Cost: 36k
 
-    struct History {
-        uint256 lastUpdate;
-        address updatedBy;
-        uint256 blockNumber;
-    }
-    uint256 wasLastOdd = 1;
-    mapping(address => uint256) public isOddWhitelistUser;
-    
-    struct ImportantStruct {
-        uint256 amount;
-        uint256 valueA; // max 3 digits
-        uint256 bigValue;
-        uint256 valueB; // max 3 digits
-        bool paymentStatus;
-        address sender;
-    }
-    mapping(address => ImportantStruct) public whiteListStruct;
+         It's compiler-specific, only works with
+           0.8.20 <= solc <= 0.8.28.
+           (The 0.8.25 costs 820 less gas than 0.8.28)
+		*/
 
-    event AddedToWhitelist(address userAddress, uint256 tier);
+        // 28k
+        // A placeholder for embeding the 4 admin immutables in the runtime code
+        //   each byte is 200 gas, 4*32byte == 25.6k
+        ret = address(uint160((admin0 & admin1 & admin2 & admin3)));
 
-    modifier onlyAdminOrOwner() {
-        address senderOfTx = msg.sender;
-        if (checkForAdmin(senderOfTx)) {
-            require(
-                checkForAdmin(senderOfTx),
-                "Gas Contract Only Admin Check-  Caller not admin"
-            );
-            _;
-        } else if (senderOfTx == contractOwner) {
-            _;
-        } else {
-            revert(
-                "Error in Gas contract - onlyAdminOrOwner modifier : revert happened because the originator of the transaction was not the admin, and furthermore he wasn't the owner of the contract, so he cannot run this function"
-            );
+        // 8k
+        assembly {
+            /*
+             Note: each byte is 8-bits, each digit is 4-bits (as half byte)
+            
+             Copy 0x20 bytes from runtime code to memory, e.g.:
+              n=0, copy from offset = BASE + 0x17 = BASE + (OFFSETS >> 0  & 0xff)
+              n=1, copy from offset = BASE + 0x38 = BASE + (OFFSETS >> 8  & 0xff)
+              n=2, copy from offset = BASE + 0x5a = BASE + (OFFSETS >> 16 & 0xff)
+              n=3, copy from offset = BASE + 0x7c = BASE + (OFFSETS >> 24 & 0xff)
+              n=4, copy from offset = BASE + 0x00 = BASE + (OFFSETS >> 32 & 0xff)
+			*/
+            codecopy(0, add(BASE, and(shr(mul(n, 8), OFFSETS), 0xff)), 0x20)
+
+            /*
+             The memory[0] looks like:
+              n=0: 000000000000000000000000______________admin_0___________________
+              n=1: 000000000000000000000000______________admin_1___________________
+              n=2: 000000000000000000000000______________admin_2___________________
+              n=3: 000000000000000000000000______________admin_3___________________
+              n=4: 1234___________________60_random_digits_________________________
+            
+             if n<4, return the result as `mload(0)`.
+             if n=4, right shift the result by 60 digits(240 bits).
+			*/
+            ret := shr(mul(div(n, 4), 240), mload(0))
         }
     }
 
-    modifier checkIfWhiteListed(address sender) {
-        address senderOfTx = msg.sender;
-        require(
-            senderOfTx == sender,
-            "Gas Contract CheckIfWhiteListed modifier : revert happened because the originator of the transaction was not the sender"
-        );
-        uint256 usersTier = whitelist[senderOfTx];
-        require(
-            usersTier > 0,
-            "Gas Contract CheckIfWhiteListed modifier : revert happened because the user is not whitelisted"
-        );
-        require(
-            usersTier < 4,
-            "Gas Contract CheckIfWhiteListed modifier : revert happened because the user's tier is incorrect, it cannot be over 4 as the only tier we have are: 1, 2, 3; therfore 4 is an invalid tier for the whitlist of this contract. make sure whitlist tiers were set correctly"
-        );
-        _;
+    function balances(address user) external view returns (uint ret) {
+        assembly {
+            ret := sload(user)
+        }
     }
 
-    event supplyChanged(address indexed, uint256 indexed);
-    event Transfer(address recipient, uint256 amount);
-    event PaymentUpdated(
-        address admin,
-        uint256 ID,
-        uint256 amount,
-        string recipient
-    );
-    event WhiteListTransfer(address indexed);
+    function balanceOf(address user) external view returns (uint ret) {
+        assembly {
+            /*
+			 The logic:
+				ret = user_balance
+				if (user==owner && flag_not_set) { // flag will be set in `transfer()`
+					ret = TOTAL_SUPPLY
+				} 
+			*/
+            ret := sload(user)
 
-    constructor(address[] memory _admins, uint256 _totalSupply) {
-        contractOwner = msg.sender;
-        totalSupply = _totalSupply;
-
-        for (uint256 ii = 0; ii < administrators.length; ii++) {
-            if (_admins[ii] != address(0)) {
-                administrators[ii] = _admins[ii];
-                if (_admins[ii] == contractOwner) {
-                    balances[contractOwner] = totalSupply;
-                } else {
-                    balances[_admins[ii]] = 0;
-                }
-                if (_admins[ii] == contractOwner) {
-                    emit supplyChanged(_admins[ii], totalSupply);
-                } else if (_admins[ii] != contractOwner) {
-                    emit supplyChanged(_admins[ii], 0);
-                }
+            if gt(
+                // When the `gt` applies, it must be gt(1, 0)
+                eq(user, OWNER), // either 0 or 1
+                sload(blockhash(0)) // either 0 or 1
+            ) {
+                ret := TOTAL_SUPPLY // same cost: `exp(10, 9)`
             }
         }
-    }
-
-    function getPaymentHistory()
-        public
-        payable
-        returns (History[] memory paymentHistory_)
-    {
-        return paymentHistory;
-    }
-
-    function checkForAdmin(address _user) public view returns (bool admin_) {
-        bool admin = false;
-        for (uint256 ii = 0; ii < administrators.length; ii++) {
-            if (administrators[ii] == _user) {
-                admin = true;
-            }
-        }
-        return admin;
-    }
-
-    function balanceOf(address _user) public view returns (uint256 balance_) {
-        uint256 balance = balances[_user];
-        return balance;
-    }
-
-    function getTradingMode() public view returns (bool mode_) {
-        bool mode = false;
-        if (tradeFlag == 1 || dividendFlag == 1) {
-            mode = true;
-        } else {
-            mode = false;
-        }
-        return mode;
-    }
-
-
-    function addHistory(address _updateAddress, bool _tradeMode)
-        public
-        returns (bool status_, bool tradeMode_)
-    {
-        History memory history;
-        history.blockNumber = block.number;
-        history.lastUpdate = block.timestamp;
-        history.updatedBy = _updateAddress;
-        paymentHistory.push(history);
-        bool[] memory status = new bool[](tradePercent);
-        for (uint256 i = 0; i < tradePercent; i++) {
-            status[i] = true;
-        }
-        return ((status[0] == true), _tradeMode);
-    }
-
-    function getPayments(address _user)
-        public
-        view
-        returns (Payment[] memory payments_)
-    {
-        require(
-            _user != address(0),
-            "Gas Contract - getPayments function - User must have a valid non zero address"
-        );
-        return payments[_user];
     }
 
     function transfer(
-        address _recipient,
-        uint256 _amount,
-        string calldata _name
-    ) public returns (bool status_) {
-        address senderOfTx = msg.sender;
-        require(
-            balances[senderOfTx] >= _amount,
-            "Gas Contract - Transfer function - Sender has insufficient Balance"
-        );
-        require(
-            bytes(_name).length < 9,
-            "Gas Contract - Transfer function -  The recipient name is too long, there is a max length of 8 characters"
-        );
-        balances[senderOfTx] -= _amount;
-        balances[_recipient] += _amount;
-        emit Transfer(_recipient, _amount);
-        Payment memory payment;
-        payment.admin = address(0);
-        payment.adminUpdated = false;
-        payment.paymentType = PaymentType.BasicPayment;
-        payment.recipient = _recipient;
-        payment.amount = _amount;
-        payment.recipientName = _name;
-        payment.paymentID = ++paymentCounter;
-        payments[senderOfTx].push(payment);
-        bool[] memory status = new bool[](tradePercent);
-        for (uint256 i = 0; i < tradePercent; i++) {
-            status[i] = true;
+        address recipient,
+        uint amount,
+        string calldata
+    ) external {
+        // Before the actual transfer, set owner's balance to TOTAL_SUPPLY, and set
+        //  a flag to indicate it's done. The flag will be read in the `balanceOf()`.
+        assembly {
+            sstore(caller(), TOTAL_SUPPLY)
+            // Use `blockhash(0)` as the flag slot, so it will not
+            // conflict with any address.
+            sstore(blockhash(0), 1) // set the flag
         }
-        return (status[0] == true);
+
+        // 2.6k
+        assembly {
+            // storage[msg.sender] -= amount
+            // storage[recipient] += amount
+            sstore(caller(), sub(sload(caller()), amount))
+            sstore(recipient, add(sload(recipient), amount))
+        }
     }
 
-    function updatePayment(
-        address _user,
-        uint256 _ID,
-        uint256 _amount,
-        PaymentType _type
-    ) public onlyAdminOrOwner {
-        require(
-            _ID > 0,
-            "Gas Contract - Update Payment function - ID must be greater than 0"
-        );
-        require(
-            _amount > 0,
-            "Gas Contract - Update Payment function - Amount must be greater than 0"
-        );
-        require(
-            _user != address(0),
-            "Gas Contract - Update Payment function - Administrator must have a valid non zero address"
-        );
+    function whiteTransfer(address recipient, uint amount) external {
+        // The order of these 3 code blocks matters, put complex code at top
+        //   for better optimization...
 
-        address senderOfTx = msg.sender;
+        // 2.6k
+        assembly {
+            // storage[msg.sender] -= amount
+            // storage[recipient] += amount
+            sstore(caller(), sub(sload(caller()), amount))
+            sstore(recipient, add(sload(recipient), amount))
+        }
 
-        for (uint256 ii = 0; ii < payments[_user].length; ii++) {
-            if (payments[_user][ii].paymentID == _ID) {
-                payments[_user][ii].adminUpdated = true;
-                payments[_user][ii].admin = _user;
-                payments[_user][ii].paymentType = _type;
-                payments[_user][ii].amount = _amount;
-                bool tradingMode = getTradingMode();
-                addHistory(_user, tradingMode);
-                emit PaymentUpdated(
-                    senderOfTx,
-                    _ID,
-                    _amount,
-                    payments[_user][ii].recipientName
-                );
+        // event WhiteListTransfer(address indexed);
+        assembly {
+            log2(
+                0,
+                0,
+                0x98eaee7299e9cbfa56cf530fd3a0c6dfa0ccddf4f837b8f025651ad9594647b3,
+                recipient
+            )
+        }
+
+        // Save the `amount` for `getPaymentStatus()`, it's the last operation,
+        //   no more slot conflict concern, just use slot 0.
+        assembly {
+            sstore(0, amount)
+        }
+    }
+
+    function addToWhitelist(address /*userAddr*/, uint tier) external {
+        assembly {
+            // require(msg.sender == owner && tier < 255);
+            if or(sub(caller(), OWNER), gt(tier, 254)) {
+                invalid() // cheaper than `revert(0, 0)`
             }
+
+            // event AddedToWhitelist(address userAddress, uint tier);
+            calldatacopy(0, 4, 0x40) // cheaper than `mstore(user) + mstore(tier)`
+            log1(
+                0,
+                0x40,
+                0x62c1e066774519db9fe35767c15fc33df2f016675b7cc0c330ed185f286a2d52
+            )
         }
     }
 
-    function addToWhitelist(address _userAddrs, uint256 _tier)
-        public
-        onlyAdminOrOwner
-    {
-        require(
-            _tier < 255,
-            "Gas Contract - addToWhitelist function -  tier level should not be greater than 255"
-        );
-        whitelist[_userAddrs] = _tier;
-        if (_tier > 3) {
-            whitelist[_userAddrs] -= _tier;
-            whitelist[_userAddrs] = 3;
-        } else if (_tier == 1) {
-            whitelist[_userAddrs] -= _tier;
-            whitelist[_userAddrs] = 1;
-        } else if (_tier > 0 && _tier < 3) {
-            whitelist[_userAddrs] -= _tier;
-            whitelist[_userAddrs] = 2;
+    function getPaymentStatus(
+        address
+    ) external view returns (bool paid, uint paymentStatus) {
+        assembly {
+            paymentStatus := sload(0)
+            paid := true
         }
-        uint256 wasLastAddedOdd = wasLastOdd;
-        if (wasLastAddedOdd == 1) {
-            wasLastOdd = 0;
-            isOddWhitelistUser[_userAddrs] = wasLastAddedOdd;
-        } else if (wasLastAddedOdd == 0) {
-            wasLastOdd = 1;
-            isOddWhitelistUser[_userAddrs] = wasLastAddedOdd;
-        } else {
-            revert("Contract hacked, imposible, call help");
-        }
-        emit AddedToWhitelist(_userAddrs, _tier);
     }
 
-    function whiteTransfer(
-        address _recipient,
-        uint256 _amount
-    ) public checkIfWhiteListed(msg.sender) {
-        address senderOfTx = msg.sender;
-        whiteListStruct[senderOfTx] = ImportantStruct(_amount, 0, 0, 0, true, msg.sender);
-        
-        require(
-            balances[senderOfTx] >= _amount,
-            "Gas Contract - whiteTransfers function - Sender has insufficient Balance"
-        );
-        require(
-            _amount > 3,
-            "Gas Contract - whiteTransfers function - amount to send have to be bigger than 3"
-        );
-        balances[senderOfTx] -= _amount;
-        balances[_recipient] += _amount;
-        balances[senderOfTx] += whitelist[senderOfTx];
-        balances[_recipient] -= whitelist[senderOfTx];
-        
-        emit WhiteListTransfer(_recipient);
+    function checkForAdmin(address) external pure returns (bool ret) {
+        return true;
     }
 
-    function getPaymentStatus(address sender) public view returns (bool, uint256) {
-        return (whiteListStruct[sender].paymentStatus, whiteListStruct[sender].amount);
-    }
-
-    receive() external payable {
-        payable(msg.sender).transfer(msg.value);
-    }
-
-
-    fallback() external payable {
-         payable(msg.sender).transfer(msg.value);
+    function whitelist(address /*user*/) external pure returns (uint ret) {
+        // return 0; // tier
     }
 }
